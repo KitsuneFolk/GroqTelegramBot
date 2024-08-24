@@ -20,8 +20,8 @@ groq_client = Groq(api_key=groq_api_key)
 user_selected_models = {}
 
 # List of available models
-AVAILABLE_MODELS = ["llama3-8b-8192", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"]
-
+AVAILABLE_MODELS = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"]
+DEFAULT_MODEL = "llama-3.1-8b-instant"
 
 # Function to create inline keyboard for model selection
 def make_keyboard():
@@ -32,7 +32,6 @@ def make_keyboard():
         ]
     )
     return markup
-
 
 # Function to call the Groq API with the selected model
 async def get_groq_response(prompt: str, model: str) -> str:
@@ -51,43 +50,59 @@ async def get_groq_response(prompt: str, model: str) -> str:
     except Exception as e:
         return f"Error fetching response from Groq: {e}"
 
-
 # Function to handle messages where the bot is mentioned
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print("handle_message")
+async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("handle_mention")
     message = update.message
     user_id = message.from_user.id
 
     if message and message.text:
         bot_username = context.bot.username
 
-        # Check if the bot was mentioned
-        if f"@{bot_username}" in message.text:
-            # Extract the text after the bot mention
-            prompt = message.text.replace(f"@{bot_username}", "").strip()
+        # Extract the text after the bot mention
+        prompt = message.text.replace(f"@{bot_username}", "").strip()
 
-            # Get the selected model for the user, default to a model if not set
-            model = user_selected_models.get(user_id, "gemma2-9b-it")
+        # Get the selected model for the user, default to a model if not set
+        model = user_selected_models.get(user_id, DEFAULT_MODEL)
 
-            # Call Groq API with the extracted prompt and selected model
-            response = await get_groq_response(prompt, model)
+        # Call Groq API with the extracted prompt and selected model
+        response = await get_groq_response(prompt, model)
 
-            # Send response back to the group
-            await message.reply_text(response)
-        else:
-            await send_model_selection_menu(update)  # Send the model selection menu if the bot was not mentioned
+        # Send response back to the group
+        await message.reply_text(response)
 
+# Function to handle the /ai command
+async def handle_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("handle_ai_command")
+    message = update.message
+    user_id = message.from_user.id
+
+    if message and message.text:
+        # Extract the text after the /ai command
+        prompt = message.text.replace("/ai", "").strip()
+
+        # If there's no prompt, ask for one
+        if not prompt:
+            await message.reply_text("Please provide a prompt after the /ai command.")
+            return
+
+        # Get the selected model for the user, default to a model if not set
+        model = user_selected_models.get(user_id, DEFAULT_MODEL)
+
+        # Call Groq API with the extracted prompt and selected model
+        response = await get_groq_response(prompt, model)
+
+        # Send response back to the group
+        await message.reply_text(response)
 
 # Function to handle the /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Bot is started")
-    await update.message.reply_text("Hello! Mention me in a group to ask something!")
-
+    await update.message.reply_text("Hello! Mention me or use /ai in a group to ask something!")
 
 # Function to handle the /model command
 async def select_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_model_selection_menu(update)
-
 
 # Function to send model selection menu
 async def send_model_selection_menu(update: Update) -> None:
@@ -98,7 +113,6 @@ async def send_model_selection_menu(update: Update) -> None:
     print(f"Sending inline keyboard for model selection.")
 
     await update.message.reply_text("Please select a model:", reply_markup=reply_markup)
-
 
 # Function to handle model selection
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -116,7 +130,6 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await query.answer("Invalid selection.")
 
-
 def main() -> None:
     print("main()")
     # Get the bot token from environment variable
@@ -127,19 +140,19 @@ def main() -> None:
     # Set up the application with your bot token
     application = ApplicationBuilder().token(telegram_bot_token).build()
 
-    # Register start command handler
+    # Register command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("model", select_model))
+    application.add_handler(CommandHandler("ai", handle_ai_command))
 
     # Register callback query handler for button presses
     application.add_handler(CallbackQueryHandler(handle_query))
 
     # Register message handler for mentions
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Entity("mention"), handle_mention))
 
     # Start the bot
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
