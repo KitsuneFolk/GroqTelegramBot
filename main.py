@@ -1,5 +1,6 @@
 import ast
 import os
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -19,6 +20,14 @@ groq_client = Groq(api_key=groq_api_key)
 # Dictionary to store user-selected models
 user_selected_models = {}
 
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": "You are a helpful AI assistant."
+}
+
+# Dictionary to store conversation history
+conversation_history = defaultdict(list)
+
 # List of available models
 AVAILABLE_MODELS = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"]
 DEFAULT_MODEL = "llama-3.1-8b-instant"
@@ -35,17 +44,20 @@ def make_keyboard():
     return markup
 
 
-# Function to call the Groq API with the selected model
-async def get_groq_response(prompt: str, model: str) -> str:
+# Function to handle the /start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("Bot is started")
+    await update.message.reply_text("Hello! Mention me or use /ai in a group to ask something!")
+
+
+# Function to call the Groq API with the selected model and conversation history
+async def get_groq_response(messages: list, model: str) -> str:
     print("get_groq_response")
     try:
+        # Prepend the system prompt to the messages
+        full_messages = [SYSTEM_PROMPT] + messages
         chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=full_messages,
             model=model,
         )
         return chat_completion.choices[0].message.content
@@ -53,33 +65,12 @@ async def get_groq_response(prompt: str, model: str) -> str:
         return f"Error fetching response from Groq: {e}"
 
 
-# Function to handle messages where the bot is mentioned
-async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print("handle_mention")
-    message = update.message
-    user_id = message.from_user.id
-
-    if message and message.text:
-        bot_username = context.bot.username
-
-        # Extract the text after the bot mention
-        prompt = message.text.replace(f"@{bot_username}", "").strip()
-
-        # Get the selected model for the user, default to a model if not set
-        model = user_selected_models.get(user_id, DEFAULT_MODEL)
-
-        # Call Groq API with the extracted prompt and selected model
-        response = await get_groq_response(prompt, model)
-
-        # Send response back to the group
-        await message.reply_text(response)
-
-
 # Function to handle messages where the bot is mentioned or /ai is used
 async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("handle_mention_or_ai")
     message = update.message
     user_id = message.from_user.id
+    chat_id = message.chat_id
 
     if message and message.text:
         bot_username = context.bot.username
@@ -101,17 +92,41 @@ async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYP
             # Get the selected model for the user, default to a model if not set
             model = user_selected_models.get(user_id, DEFAULT_MODEL)
 
+            # Start a new conversation
+            conversation_history[(chat_id, user_id)] = [{"role": "user", "content": prompt}]
+
             # Call Groq API with the extracted prompt and selected model
-            response = await get_groq_response(prompt, model)
+            response = await get_groq_response(conversation_history[(chat_id, user_id)], model)
+
+            # Add bot's response to the conversation history
+            conversation_history[(chat_id, user_id)].append({"role": "assistant", "content": response})
 
             # Send response back to the group
             await message.reply_text(response)
 
 
-# Function to handle the /start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print("Bot is started")
-    await update.message.reply_text("Hello! Mention me or use /ai in a group to ask something!")
+# Function to handle replies to the bot's messages
+async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("handle_reply")
+    message = update.message
+    user_id = message.from_user.id
+    chat_id = message.chat_id
+
+    if message and message.text and message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
+        # Get the selected model for the user, default to a model if not set
+        model = user_selected_models.get(user_id, DEFAULT_MODEL)
+
+        # Add user's reply to the conversation history
+        conversation_history[(chat_id, user_id)].append({"role": "user", "content": message.text})
+
+        # Call Groq API with the conversation history and selected model
+        response = await get_groq_response(conversation_history[(chat_id, user_id)], model)
+
+        # Add bot's response to the conversation history
+        conversation_history[(chat_id, user_id)].append({"role": "assistant", "content": response})
+
+        # Send response back to the group
+        await message.reply_text(response)
 
 
 # Function to handle the /model command
@@ -168,6 +183,12 @@ def main() -> None:
     application.add_handler(MessageHandler(
         filters.TEXT & (filters.Entity("mention") | filters.Regex(r'^/ai')),
         handle_mention_or_ai
+    ))
+
+    # Register message handler for replies to the bot's messages
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.REPLY,
+        handle_reply
     ))
 
     # Start the bot
