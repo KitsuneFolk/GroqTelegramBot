@@ -2,11 +2,11 @@ import ast
 import os
 from collections import defaultdict
 
+import google.generativeai as genai
 from dotenv import load_dotenv
 from groq import Groq
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import google.generativeai as genai
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -37,8 +37,16 @@ SYSTEM_PROMPT = {
 conversation_history = defaultdict(list)
 
 # List of available models
-AVAILABLE_MODELS = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it", "gemini-1.5-flash-8b-exp-0827", "gemini-1.5-flash-exp-0827", "gemini-1.5-pro-exp-0827"]
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+AVAILABLE_MODELS = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it",
+                    "gemini-1.5-flash-8b-exp-0827", "gemini-1.5-flash-exp-0827", "gemini-1.5-pro-exp-0827"]
+DEFAULT_MODEL = "gemini-1.5-flash-8b-exp-0827"
+
+# Gemini safety settings
+safety_settings = [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                   {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                   {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                   {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}]
+
 
 # Function to create inline keyboard for model selection
 def make_keyboard():
@@ -50,27 +58,40 @@ def make_keyboard():
     )
     return markup
 
+
 # Function to handle the /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("Bot is started")
     await update.message.reply_text("Hello! Mention me or use /ai in a group to ask something!")
+
 
 # Function to call the appropriate API based on the selected model
 async def get_ai_response(messages: list, model: str) -> str:
     print(f"get_ai_response for model: {model}")
     try:
         if model.startswith("gemini"):
-            gemini_model = genai.GenerativeModel(model)
-            chat = gemini_model.start_chat(history=[])
+            gemini_model = genai.GenerativeModel(model, safety_settings=safety_settings,
+                                                 system_instruction=SYSTEM_PROMPT['content'])
 
-            # Apply system prompt for Gemini models
-            system_message = SYSTEM_PROMPT["content"]
-            chat.send_message(f"System: {system_message}")
-
+            # Convert messages to the format expected by Gemini
+            history = []
             for message in messages:
                 if message['role'] == 'user':
-                    response = chat.send_message(message['content'])
-            return response.text
+                    history.append({"role": "user", "parts": message['content']})
+                elif message['role'] == 'assistant':
+                    history.append({"role": "model", "parts": message['content']})
+            print(history)
+            # Start chat with history
+            chat = gemini_model.start_chat(history=history, )
+
+            # Send the last user message to get a response
+            last_user_message = next((m['content'] for m in reversed(messages) if m['role'] == 'user'), None)
+            print("history = ", history)
+            if last_user_message:
+                response = chat.send_message(last_user_message)
+                return response.text
+            else:
+                return "No user message found in the conversation history."
         else:
             # Prepend the system prompt to the messages
             full_messages = [SYSTEM_PROMPT] + messages
@@ -81,6 +102,7 @@ async def get_ai_response(messages: list, model: str) -> str:
             return chat_completion.choices[0].message.content
     except Exception as e:
         return f"Error fetching response: {e}"
+
 
 # Function to handle messages where the bot is mentioned or /ai is used
 async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -121,6 +143,7 @@ async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYP
             # Send response back to the group
             await message.reply_text(response)
 
+
 # Function to handle replies to the bot's messages
 async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("handle_reply")
@@ -144,9 +167,11 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Send response back to the group
         await message.reply_text(response)
 
+
 # Function to handle the /model command
 async def select_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_model_selection_menu(update)
+
 
 # Function to send model selection menu
 async def send_model_selection_menu(update: Update) -> None:
@@ -157,6 +182,7 @@ async def send_model_selection_menu(update: Update) -> None:
     print(f"Sending inline keyboard for model selection.")
 
     await update.message.reply_text("Please select a model:", reply_markup=reply_markup)
+
 
 # Function to handle model selection
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -173,6 +199,7 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text(f"Model '{selected_model}' has been selected. You can now ask your questions.")
     else:
         await query.answer("Invalid selection.")
+
 
 def main() -> None:
     print("main()")
@@ -205,6 +232,7 @@ def main() -> None:
 
     # Start the bot
     application.run_polling()
+
 
 if __name__ == '__main__':
     main()
