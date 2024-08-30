@@ -69,7 +69,11 @@ async def get_ai_response(messages: list, model: str) -> str:
         print("history = ", messages)
 
         # Only send the last user message to get a response
-        response = chat.send_message(last_user_message)
+        response = chat.send_message(last_user_message, generation_config=genai.types.GenerationConfig(
+            candidate_count=1,
+            max_output_tokens=1024,
+            temperature=1.0,
+        ))
         return response.text
     except Exception as e:
         return f"Error fetching response: {e}"
