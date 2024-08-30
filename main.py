@@ -1,22 +1,15 @@
 import ast
 import os
 from collections import defaultdict
+from functools import wraps
 
 import google.generativeai as genai
 from dotenv import load_dotenv
-from groq import Groq
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # Load environment variables from the .env file
 load_dotenv()
-
-# Initialize the Groq client with the API key
-groq_api_key = os.getenv("GROQ_API_KEY")
-if not groq_api_key:
-    raise ValueError("GROQ_API_KEY is not set in the environment variables.")
-
-groq_client = Groq(api_key=groq_api_key)
 
 # Initialize Google's generative AI
 google_api_key = os.getenv("GOOGLE_API_KEY")
@@ -28,18 +21,14 @@ genai.configure(api_key=google_api_key)
 # Dictionary to store user-selected models
 user_selected_models = {}
 
-SYSTEM_PROMPT = {
-    "role": "system",
-    "content": "You are a helpful AI assistant."
-}
+SYSTEM_PROMPT = "You are a helpful AI assistant."
 
 # Dictionary to store conversation history
 conversation_history = defaultdict(list)
 
 # List of available models
-AVAILABLE_MODELS = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it",
-                    "gemini-1.5-flash-8b-exp-0827", "gemini-1.5-flash-exp-0827", "gemini-1.5-pro-exp-0827"]
-DEFAULT_MODEL = "gemini-1.5-flash-8b-exp-0827"
+AVAILABLE_MODELS = ["gemini-1.5-flash-exp-0827", "gemini-1.5-pro-exp-0827"]
+DEFAULT_MODEL = "gemini-1.5-flash-exp-0827"
 
 # Gemini safety settings
 safety_settings = [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -65,46 +54,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Hello! Mention me or use /ai in a group to ask something!")
 
 
-# Function to call the appropriate API based on the selected model
+# Function to call the Gemini API
 async def get_ai_response(messages: list, model: str) -> str:
     print(f"get_ai_response for model: {model}")
     try:
-        if model.startswith("gemini"):
-            gemini_model = genai.GenerativeModel(model, safety_settings=safety_settings,
-                                                 system_instruction=SYSTEM_PROMPT['content'])
+        gemini_model = genai.GenerativeModel(model, safety_settings=safety_settings,
+                                             system_instruction=SYSTEM_PROMPT)
 
-            # Convert messages to the format expected by Gemini
-            history = []
-            for message in messages:
-                if message['role'] == 'user':
-                    history.append({"role": "user", "parts": message['content']})
-                elif message['role'] == 'assistant':
-                    history.append({"role": "model", "parts": message['content']})
-            print(history)
-            # Start chat with history
-            chat = gemini_model.start_chat(history=history, )
+        # Start chat with history, but don't send a message yet
+        chat = gemini_model.start_chat(history=messages[:-1])  # Exclude the last message
 
-            # Send the last user message to get a response
-            last_user_message = next((m['content'] for m in reversed(messages) if m['role'] == 'user'), None)
-            print("history = ", history)
-            if last_user_message:
-                response = chat.send_message(last_user_message)
-                return response.text
-            else:
-                return "No user message found in the conversation history."
-        else:
-            # Prepend the system prompt to the messages
-            full_messages = [SYSTEM_PROMPT] + messages
-            chat_completion = groq_client.chat.completions.create(
-                messages=full_messages,
-                model=model,
-            )
-            return chat_completion.choices[0].message.content
+        # Get the last user message
+        last_user_message = messages[-1]['parts']
+        print("history = ", messages)
+
+        # Only send the last user message to get a response
+        response = chat.send_message(last_user_message)
+        return response.text
     except Exception as e:
         return f"Error fetching response: {e}"
 
 
+# Add this decorator function
+def ensure_single_execution(func):
+    processed_messages = set()
+
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        message_id = update.message.message_id
+        if message_id in processed_messages:
+            return
+        processed_messages.add(message_id)
+        return await func(update, context)
+
+    return wrapper
+
+
 # Function to handle messages where the bot is mentioned or /ai is used
+@ensure_single_execution
 async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     print("handle_mention_or_ai")
     message = update.message
@@ -131,14 +118,14 @@ async def handle_mention_or_ai(update: Update, context: ContextTypes.DEFAULT_TYP
             # Get the selected model for the user, default to a model if not set
             model = user_selected_models.get(user_id, DEFAULT_MODEL)
 
-            # Start a new conversation
-            conversation_history[(chat_id, user_id)] = [{"role": "user", "content": prompt}]
+            # Add the new message to the conversation history
+            conversation_history[(chat_id, user_id)].append({"role": "user", "parts": prompt})
 
-            # Call AI API with the extracted prompt and selected model
+            # Call AI API with the conversation history and selected model
             response = await get_ai_response(conversation_history[(chat_id, user_id)], model)
 
             # Add bot's response to the conversation history
-            conversation_history[(chat_id, user_id)].append({"role": "assistant", "content": response})
+            conversation_history[(chat_id, user_id)].append({"role": "model", "parts": response})
 
             # Send response back to the group
             await message.reply_text(response)
@@ -156,13 +143,13 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         model = user_selected_models.get(user_id, DEFAULT_MODEL)
 
         # Add user's reply to the conversation history
-        conversation_history[(chat_id, user_id)].append({"role": "user", "content": message.text})
+        conversation_history[(chat_id, user_id)].append({"role": "user", "parts": message.text})
 
         # Call AI API with the conversation history and selected model
         response = await get_ai_response(conversation_history[(chat_id, user_id)], model)
 
         # Add bot's response to the conversation history
-        conversation_history[(chat_id, user_id)].append({"role": "assistant", "content": response})
+        conversation_history[(chat_id, user_id)].append({"role": "model", "parts": response})
 
         # Send response back to the group
         await message.reply_text(response)
